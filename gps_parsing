@@ -1,0 +1,164 @@
+#include <Arduino.h>
+#include <HardwareSerial.h>
+
+// Define hardware serial for UART1
+HardwareSerial Serial1(PA10, PA9); // RX, TX
+
+// Buffer for NMEA sentence
+char buffer[128];
+int bufferIndex = 0;
+
+// Time zone offset in hours (for IST: +5:30)
+const int TZ_HOURS = 5;
+const int TZ_MINUTES = 30;
+
+// Struct to store parsed data
+struct GpsData {
+  char date[7];    // DDMMYY
+  char time[7];    // HHMMSS
+  char lat[11];
+  char ns;         // N or S
+  char lon[11];
+  char ew;         // E or W
+  float speed;
+  char mode;       // A=Active V=Void
+  bool dataReady;
+} gpsData;
+
+// Function to adjust time for timezone
+void adjustTimeZone(const char* utcTime, char* localTime) {
+  int hours = (utcTime[0] - '0') * 10 + (utcTime[1] - '0');
+  int minutes = (utcTime[2] - '0') * 10 + (utcTime[3] - '0');
+  int seconds = (utcTime[4] - '0') * 10 + (utcTime[5] - '0');
+  
+  // Add timezone offset
+  minutes += TZ_MINUTES;
+  hours += TZ_HOURS + (minutes / 60);
+  minutes = minutes % 60;
+  hours = hours % 24;
+  
+  // Format back to string
+  sprintf(localTime, "%02d%02d%02d", hours, minutes, seconds);
+}
+
+// Parse RMC sentence
+void parseRMC(char* sentence) {
+  char* token = strtok(sentence, ",");
+  int fieldCount = 0;
+  char tempTime[7];
+  
+  // Clear the dataReady flag
+  gpsData.dataReady = false;
+  
+  while (token != NULL) {
+    switch(fieldCount) {
+      case 1: // Time
+        if (strlen(token) >= 6) {
+          strncpy(tempTime, token, 6);
+          tempTime[6] = '\0';
+          adjustTimeZone(tempTime, gpsData.time);
+        }
+        break;
+      case 2: // Status A=Active V=Void
+        if (strlen(token) > 0) {
+          gpsData.mode = token[0];
+        }
+        break;
+      case 3: // Latitude
+        if (strlen(token) > 0) {
+          strncpy(gpsData.lat, token, 10);
+          gpsData.lat[10] = '\0';
+        }
+        break;
+      case 4: // N/S indicator
+        if (strlen(token) > 0) {
+          gpsData.ns = token[0];
+        }
+        break;
+      case 5: // Longitude
+        if (strlen(token) > 0) {
+          strncpy(gpsData.lon, token, 10);
+          gpsData.lon[10] = '\0';
+        }
+        break;
+      case 6: // E/W indicator
+        if (strlen(token) > 0) {
+          gpsData.ew = token[0];
+        }
+        break;
+      case 7: // Speed in knots
+        if (strlen(token) > 0) {
+          gpsData.speed = atof(token) * 1.852; // Convert knots to km/h
+        } else {
+          gpsData.speed = 0.0;
+        }
+        break;
+      case 9: // Date
+        if (strlen(token) >= 6) {
+          strncpy(gpsData.date, token, 6);
+          gpsData.date[6] = '\0';
+          gpsData.dataReady = true;
+        }
+        break;
+    }
+    token = strtok(NULL, ",");
+    fieldCount++;
+  }
+  
+  // Output data only if we have valid fix (mode = A)
+  if (gpsData.dataReady && gpsData.mode == 'A') {
+    Serial1.print(gpsData.date);
+    Serial1.print(",");
+    Serial1.print(gpsData.time);
+    Serial1.print(",");
+    Serial1.print(gpsData.lon);
+    Serial1.print(gpsData.ew);
+    Serial1.print(",");
+    Serial1.print(gpsData.lat);
+    Serial1.print(gpsData.ns);
+    Serial1.print(",");
+    Serial1.println(gpsData.speed, 1);
+  }
+  else {
+    // Only print signal lost if mode is Void
+    if (gpsData.mode == 'V') {
+      Serial1.println("gps signal lost");
+    }
+  }
+}
+
+void setup() {
+  // Initialize UART1 with baud rate 9600
+  Serial1.begin(9600);
+  
+  // Initialize the GPS data struct
+  memset(&gpsData, 0, sizeof(gpsData));
+  
+  // Wait a moment for serial to initialize
+  delay(1000);
+}
+
+void loop() {
+  // Check if data is available on UART1
+  while (Serial1.available() > 0) {
+    char c = Serial1.read();
+    
+    if (c == '$') { // Start of NMEA sentence
+      bufferIndex = 0;
+    }
+    else if (c == '\n' || c == '\r') { // End of NMEA sentence
+      if (bufferIndex > 0) {
+        buffer[bufferIndex] = '\0';
+        
+        // Check if it's an RMC sentence
+        if (strstr(buffer, "GNRMC") || strstr(buffer, "GPRMC")) {
+          parseRMC(buffer);
+        }
+      }
+      bufferIndex = 0;
+    }
+    else if (bufferIndex < sizeof(buffer) - 1) {
+      buffer[bufferIndex++] = c;
+    }
+  }
+}
